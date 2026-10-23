@@ -32,7 +32,7 @@ def _get_fix(diag):
     patch = diag.get("patch") or diag.get("yaml_patch") or ""  
     image = memory = None  
     if isinstance(patch, dict):  
-        image, memory = patch.get("image"), patch.get("memory")  
+        image, memory = patch.get("image"), patch.get("memory") or patch.get("memory_limit")  
     else:  
         m = re.search(r'image:\s*"?([^\s"]+)', patch)  
         image = m.group(1) if m else None  
