@@ -14,7 +14,7 @@ spec:
       serviceAccountName: ai-agent  
       containers:  
         - name: agent  
-          image: ghcr.io/techabdulrahman/ai-agent:2bb64fae95f0831f23716723f7414d126eb37f60
+          image: ghcr.io/techabdulrahman/ai-agent:c5bc591cc20b1e8dc50eb8f1c2b41b110db79dd7
           ports: [{ containerPort: 8080 }]  
           envFrom:  
             - secretRef: { name: ai-agent-secrets }  
