@@ -14,7 +14,7 @@ spec:
       serviceAccountName: ai-agent  
       containers:  
         - name: agent  
-          image: ghcr.io/techabdulrahman/ai-agent:3440bdaaa23391160e88f0346fcdeb54ed94a708
+          image: ghcr.io/techabdulrahman/ai-agent:381c34d63ff698f45c114f5ccf2d6268d0f93f51  
           ports: [{ containerPort: 8080 }]  
           envFrom:  
             - secretRef: { name: ai-agent-secrets }  
@@ -25,6 +25,12 @@ spec:
               value: https://breezysamosa3494.grafana.net  
             - name: POLL_SECONDS  
               value: "60"  
+            - name: GITHUB_REPO  
+              value: techabdulrahman/ai-k8s-gitops  
+            - name: GITOPS_ROOT  
+              value: apps/  
+            - name: AUTO_PR_NAMESPACES  
+              value: default  
           readinessProbe:  
             httpGet: { path: /healthz, port: 8080 }  
           resources:  
