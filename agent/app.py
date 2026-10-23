@@ -1,4 +1,4 @@
-import os, json, logging, hashlib  
+import os, json, logging, hashlib, threading, time, urllib.request, urllib.parse  
 from collections import deque  
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks  
 from kubernetes import client, config  
@@ -8,16 +8,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("ai-agent")  
 
 WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]  
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  
-gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])  
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")  
+GRAFANA_URL = os.getenv("GRAFANA_URL", "").rstrip("/")  
+GRAFANA_TOKEN = os.getenv("GRAFANA_TOKEN", "")  
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "60"))  
 
+gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])  
 config.load_incluster_config()  
 core = client.CoreV1Api()  
-apps = client.AppsV1Api()  
 
 app = FastAPI()  
-DIAGNOSES = deque(maxlen=50)      # last 50 results, shown at /diagnoses  
-SEEN = set()                      # avoid diagnosing the same alert twice  
+DIAGNOSES = deque(maxlen=50)  
+SEEN = set()  
+LOCK = threading.Lock()  
 
 
 def safe(fn, default="(not available)"):  
@@ -27,40 +30,26 @@ def safe(fn, default="(not available)"):
         return f"{default}: {e.__class__.__name__}"  
 
 
-def collect(ns: str, pod: str, container: str) -> dict:  
-    """Read-only evidence, the same steps a human would do."""  
+def collect(ns, pod, container):  
     p = safe(lambda: core.read_namespaced_pod(pod, ns), None)  
-    evidence = {"namespace": ns, "pod": pod, "container": container}  
-
+    ev = {"namespace": ns, "pod": pod, "container": container}  
     if p and not isinstance(p, str):  
-        evidence["phase"] = p.status.phase  
-        evidence["containers"] = [  
-            {"name": c.name, "image": c.image,  
-             "resources": c.resources.to_dict() if c.resources else None,  
-             "command": c.command, "args": c.args}  
-            for c in p.spec.containers  
-        ]  
-        evidence["container_statuses"] = [  
-            {"name": s.name, "ready": s.ready, "restarts": s.restart_count,  
-             "state": s.state.to_dict(), "last_state": s.last_state.to_dict()}  
-            for s in (p.status.container_statuses or [])  
-        ]  
+        ev["phase"] = p.status.phase  
+        ev["containers"] = [{"name": c.name, "image": c.image,  
+                             "resources": c.resources.to_dict() if c.resources else None,  
+                             "command": c.command, "args": c.args} for c in p.spec.containers]  
+        ev["container_statuses"] = [{"name": s.name, "ready": s.ready, "restarts": s.restart_count,  
+                                     "state": s.state.to_dict(), "last_state": s.last_state.to_dict()}  
+                                    for s in (p.status.container_statuses or [])]  
         owner = (p.metadata.owner_references or [None])[0]  
         if owner and owner.kind == "ReplicaSet":  
-            evidence["owner"] = owner.name.rsplit("-", 1)[0]  # Deployment name  
-
-    events = safe(lambda: core.list_namespaced_event(  
-        ns, field_selector=f"involvedObject.name={pod}").items, [])  
+            ev["owner"] = owner.name.rsplit("-", 1)[0]  
+    events = safe(lambda: core.list_namespaced_event(ns, field_selector=f"involvedObject.name={pod}").items, [])  
     if isinstance(events, list):  
-        evidence["events"] = [  
-            f"{e.type} {e.reason} x{e.count}: {e.message}" for e in events[-15:]  
-        ]  
-
-    evidence["logs_previous"] = safe(lambda: core.read_namespaced_pod_log(  
-        pod, ns, container=container or None, previous=True, tail_lines=40))  
-    evidence["logs_current"] = safe(lambda: core.read_namespaced_pod_log(  
-        pod, ns, container=container or None, tail_lines=20))  
-    return evidence  
+        ev["events"] = [f"{e.type} {e.reason} x{e.count}: {e.message}" for e in events[-15:]]  
+    ev["logs_previous"] = safe(lambda: core.read_namespaced_pod_log(pod, ns, container=container or None, previous=True, tail_lines=40))  
+    ev["logs_current"] = safe(lambda: core.read_namespaced_pod_log(pod, ns, container=container or None, tail_lines=20))  
+    return ev  
 
 
 PROMPT = """You are a Kubernetes SRE assistant. Diagnose ONE failing pod.  
@@ -70,41 +59,73 @@ Evidence (JSON):
 
 Rules:  
 - Use only the evidence. If it is not enough, say so.  
-- Answer in JSON with keys:  
-  root_cause (1-2 sentences),  
-  evidence (list of the exact lines that prove it),  
-  fix (what to change, in the Deployment YAML if possible),  
-  yaml_patch (a small YAML snippet for the container, or null),  
-  confidence (low|medium|high)  
+- Prefer pinned image tags (for example nginx:1.27), never "latest".  
+- Answer in JSON with keys: root_cause, evidence (list of exact lines), fix,  
+  yaml_patch (small YAML snippet or null), confidence (low|medium|high)  
 """  
 
 
-def diagnose(alert: dict):  
-    labels = alert.get("labels", {})  
+def diagnose(labels, source):  
     ns, pod = labels.get("namespace"), labels.get("pod")  
     if not ns or not pod:  
         log.warning("alert without namespace/pod: %s", labels)  
         return  
     issue = labels.get("issue") or labels.get("alertname", "unknown")  
     evidence = collect(ns, pod, labels.get("container", ""))  
-
-    resp = gemini.models.generate_content(  
-        model=GEMINI_MODEL,  
-        contents=PROMPT.format(issue=issue, evidence=json.dumps(evidence, default=str)[:12000]),  
-        config={"response_mime_type": "application/json", "temperature": 0.1},  
-    )  
     try:  
+        resp = gemini.models.generate_content(  
+            model=GEMINI_MODEL,  
+            contents=PROMPT.format(issue=issue, evidence=json.dumps(evidence, default=str)[:12000]),  
+            config={"response_mime_type": "application/json", "temperature": 0.1})  
         result = json.loads(resp.text)  
-    except Exception:  
-        result = {"raw": resp.text}  
-
-    record = {"issue": issue, "namespace": ns, "pod": pod,  
-              "deployment": evidence.get("owner"), "diagnosis": result}  
+    except Exception as e:  
+        log.exception("diagnosis failed")  
+        result = {"error": str(e)[:300]}  
+    record = {"source": source, "issue": issue, "namespace": ns, "pod": pod,  
+              "deployment": evidence.get("owner"),  
+              "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "diagnosis": result}  
     DIAGNOSES.appendleft(record)  
     log.info("DIAGNOSIS %s", json.dumps(record))  
 
 
-@app.post("/webhook")  
+def fetch_firing_alerts():  
+    """Grafana Alertmanager API: active, not silenced, ai_agent=true."""  
+    q = urllib.parse.urlencode([("active", "true"), ("silenced", "false"),  
+                                ("inhibited", "false"), ("filter", 'ai_agent="true"')])  
+    req = urllib.request.Request(f"{GRAFANA_URL}/api/alertmanager/grafana/api/v2/alerts?{q}",  
+                                 headers={"Authorization": f"Bearer {GRAFANA_TOKEN}"})  
+    with urllib.request.urlopen(req, timeout=15) as r:  
+        return json.load(r)  
+
+
+def poll_loop():  
+    log.info("polling %s every %ss", GRAFANA_URL, POLL_SECONDS)  
+    while True:  
+        try:  
+            alerts = [a for a in fetch_firing_alerts() if a.get("status", {}).get("state") == "active"]  
+            current = {a["fingerprint"] for a in alerts}  
+            with LOCK:  
+                SEEN.intersection_update(current)   # forget resolved alerts, so a new fire is diagnosed again  
+                new = [a for a in alerts if a["fingerprint"] not in SEEN]  
+                SEEN.update(a["fingerprint"] for a in new)  
+            for a in new:  
+                log.info("new alert %s %s/%s", a["labels"].get("alertname"),  
+                         a["labels"].get("namespace"), a["labels"].get("pod"))  
+                diagnose(a["labels"], "grafana-poll")  
+        except Exception as e:  
+            log.warning("poll failed: %s", e)  
+        time.sleep(POLL_SECONDS)  
+
+
+@app.on_event("startup")  
+def start_polling():  
+    if GRAFANA_URL and GRAFANA_TOKEN:  
+        threading.Thread(target=poll_loop, daemon=True).start()  
+    else:  
+        log.warning("GRAFANA_URL/GRAFANA_TOKEN not set: polling disabled")  
+
+
+@app.post("/webhook")          # kept for manual tests  
 async def webhook(req: Request, bg: BackgroundTasks, authorization: str = Header(default="")):  
     if authorization != f"Bearer {WEBHOOK_TOKEN}":  
         raise HTTPException(401)  
@@ -113,10 +134,11 @@ async def webhook(req: Request, bg: BackgroundTasks, authorization: str = Header
         if a.get("status") != "firing":  
             continue  
         key = a.get("fingerprint") or hashlib.sha1(json.dumps(a.get("labels"), sort_keys=True).encode()).hexdigest()  
-        if key in SEEN:  
-            continue  
-        SEEN.add(key)  
-        bg.add_task(diagnose, a)          # answer Grafana fast, work in background  
+        with LOCK:  
+            if key in SEEN:  
+                continue  
+            SEEN.add(key)  
+        bg.add_task(diagnose, a.get("labels", {}), "webhook")  
     return {"accepted": True}  
 
 
