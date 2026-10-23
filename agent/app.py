@@ -3,6 +3,7 @@ from collections import deque
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks  
 from kubernetes import client, config  
 from google import genai  
+from github_pr import open_pr                                   # NEW  
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")  
 log = logging.getLogger("ai-agent")  
@@ -61,8 +62,12 @@ Rules:
 - Use only the evidence. If it is not enough, say so.  
 - Prefer pinned image tags (for example nginx:1.27), never "latest".  
 - Answer in JSON with keys: root_cause, evidence (list of exact lines), fix,  
-  yaml_patch (small YAML snippet or null), confidence (low|medium|high)  
-"""  
+  yaml_patch (small YAML snippet or null), confidence (low|medium|high),  
+  patch: an object with keys container, image, memory_limit, memory_request  
+         (use null for values that should not change), or null if the fix is  
+         not an image or memory change.  
+- Memory values use Mi or Gi, for example "256Mi". Maximum 1Gi.  
+"""                                                             # NEW (patch rules)  
 
 
 def diagnose(labels, source):  
@@ -84,6 +89,11 @@ def diagnose(labels, source):
     record = {"source": source, "issue": issue, "namespace": ns, "pod": pod,  
               "deployment": evidence.get("owner"),  
               "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "diagnosis": result}  
+    try:                                                        # NEW  
+        record["pr"] = open_pr(record, result.get("patch"))     # NEW  
+    except Exception as e:                                      # NEW  
+        log.exception("PR failed")                              # NEW  
+        record["pr"] = f"error: {str(e)[:200]}"                 # NEW  
     DIAGNOSES.appendleft(record)  
     log.info("DIAGNOSIS %s", json.dumps(record))  
 
@@ -105,7 +115,7 @@ def poll_loop():
             alerts = [a for a in fetch_firing_alerts() if a.get("status", {}).get("state") == "active"]  
             current = {a["fingerprint"] for a in alerts}  
             with LOCK:  
-                SEEN.intersection_update(current)   # forget resolved alerts, so a new fire is diagnosed again  
+                SEEN.intersection_update(current)  
                 new = [a for a in alerts if a["fingerprint"] not in SEEN]  
                 SEEN.update(a["fingerprint"] for a in new)  
             for a in new:  
@@ -125,7 +135,7 @@ def start_polling():
         log.warning("GRAFANA_URL/GRAFANA_TOKEN not set: polling disabled")  
 
 
-@app.post("/webhook")          # kept for manual tests  
+@app.post("/webhook")  
 async def webhook(req: Request, bg: BackgroundTasks, authorization: str = Header(default="")):  
     if authorization != f"Bearer {WEBHOOK_TOKEN}":  
         raise HTTPException(401)  
