@@ -68,6 +68,9 @@ def open_pr(*args, **kwargs):
     root = os.environ.get("GITOPS_ROOT", "apps/")  
     allowed = [n.strip() for n in os.environ.get("AUTO_PR_NAMESPACES", "default").split(",")]  
     ns, dep = ev.get("namespace"), ev.get("deployment")  
+    if not dep:  
+        m = re.match(r"^(.+)-[a-z0-9]{6,10}-[a-z0-9]{5}$", ev.get("pod") or "")  
+        dep = m.group(1) if m else None  
 
     if not repo or not os.environ.get("GITHUB_TOKEN"):  
         return log.info("PR skipped: GITHUB_REPO or GITHUB_TOKEN missing")  
