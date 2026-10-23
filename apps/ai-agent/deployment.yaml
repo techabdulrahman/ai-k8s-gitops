@@ -14,10 +14,13 @@ spec:
       serviceAccountName: ai-agent  
       containers:  
         - name: agent  
-          image: ghcr.io/techabdulrahman/ai-agent:446b745e3a15ebc19e2549b23d45e73c48967773
+          image: ghcr.io/techabdulrahman/ai-agent:446b745e3a15ebc19e2549b23d45e73c48967773  
           ports: [{ containerPort: 8080 }]  
           envFrom:  
             - secretRef: { name: ai-agent-secrets }  
+          env:                              # NEW  
+            - name: GEMINI_MODEL            # NEW  
+              value: gemini-3.5-flash-lite  # NEW  
           readinessProbe:  
             httpGet: { path: /healthz, port: 8080 }  
           resources:  
