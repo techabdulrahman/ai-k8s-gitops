@@ -1,120 +1,135 @@
-import os, re, json, time, base64, logging, urllib.request, urllib.error  
-import yaml  
+import base64, json, logging, os, re, urllib.request, urllib.error  
 
-log = logging.getLogger("ai-agent")  
-REPO = os.getenv("GITHUB_REPO", "")  
-BASE = os.getenv("GITHUB_BRANCH", "main")  
-TOKEN = os.getenv("GITHUB_TOKEN", "")  
-ROOT = os.getenv("GITOPS_ROOT", "apps/")  
-ALLOWED_NS = {n.strip() for n in os.getenv("AUTO_PR_NAMESPACES", "default").split(",")}  
-IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+$")   # must have a tag  
-MEM_RE = re.compile(r"^(\d+)(Mi|Gi)$")  
-MAX_MEM_MI = 1024  
+log = logging.getLogger("github_pr")  
+API = "https://api.github.com"  
+MAX_MEM_MI = 1024  # never raise memory above 1Gi  
 
 
-def gh(method, path, body=None):  
+def _gh(method, path, body=None):  
     req = urllib.request.Request(  
-        f"https://api.github.com/repos/{REPO}{path}", method=method,  
+        API + path,  
+        method=method,  
         data=json.dumps(body).encode() if body is not None else None,  
-        headers={"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json",  
-                 "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})  
+        headers={  
+            "Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],  
+            "Accept": "application/vnd.github+json",  
+            "Content-Type": "application/json",  
+        },  
+    )  
     with urllib.request.urlopen(req, timeout=20) as r:  
-        data = r.read()  
-        return json.loads(data) if data else {}  
+        txt = r.read().decode()  
+        return json.loads(txt) if txt else {}  
 
 
-def to_mi(v):  
-    m = MEM_RE.match(str(v or ""))  
+def _mem_mi(v):  
+    m = re.fullmatch(r"(\d+)(Mi|Gi)", str(v).strip().strip('"'))  
     if not m:  
         return None  
     return int(m.group(1)) * (1024 if m.group(2) == "Gi" else 1)  
 
 
-def find_manifest(deploy, ns):  
-    tree = gh("GET", f"/git/trees/{BASE}?recursive=1")["tree"]  
-    for item in tree:  
-        p = item["path"]  
-        if item["type"] != "blob" or not p.startswith(ROOT) or not p.endswith((".yaml", ".yml")):  
-            continue  
-        f = gh("GET", f"/contents/{p}?ref={BASE}")  
-        docs = list(yaml.safe_load_all(base64.b64decode(f["content"]).decode()))  
-        for d in docs:  
-            md = (d or {}).get("metadata", {})  
-            if d and d.get("kind") == "Deployment" and md.get("name") == deploy \  
-                    and md.get("namespace", "default") == ns:  
-                return p, f["sha"], docs  
-    return None, None, None  
+def _get_fix(diag):  
+    patch = diag.get("patch") or diag.get("yaml_patch") or ""  
+    image = memory = None  
+    if isinstance(patch, dict):  
+        image, memory = patch.get("image"), patch.get("memory")  
+    else:  
+        m = re.search(r'image:\s*"?([^\s"]+)', patch)  
+        image = m.group(1) if m else None  
+        m = re.search(r'memory:\s*"?(\d+(?:Mi|Gi))', patch)  
+        memory = m.group(1) if m else None  
+    return image, memory  
 
 
-def apply_patch(docs, deploy, patch):  
-    """Only image and memory changes are allowed."""  
-    changes = []  
-    for d in docs:  
-        if not d or d.get("kind") != "Deployment" or d["metadata"]["name"] != deploy:  
-            continue  
-        containers = d["spec"]["template"]["spec"]["containers"]  
-        c = next((c for c in containers if c["name"] == patch.get("container")), containers[0])  
+def _edit(text, dep, image, memory):  
+    docs = text.split("\n---")  
+    for i, d in enumerate(docs):  
+        if re.search(r"kind:\s*Deployment", d) and re.search(r"name:\s*" + re.escape(dep) + r"\s*$", d, re.M):  
+            new = d  
+            if image:  
+                new = re.sub(r"(image:\s*)\S+", lambda m: m.group(1) + image, new, count=1)  
+            if memory:  
+                new = re.sub(r"(limits:\s*\{[^}]*memory:\s*)[^,}\s]+", lambda m: m.group(1) + memory, new, count=1)  
+                new = re.sub(r"(limits:\s*\n(?:[ \t]+\S.*\n)*?[ \t]+memory:\s*)\S+", lambda m: m.group(1) + memory, new, count=1)  
+            if new != d:  
+                docs[i] = new  
+                return "\n---".join(docs)  
+    return None  
 
-        img = patch.get("image")  
-        if img and img != c.get("image"):  
-            if not IMAGE_RE.match(img) or img.endswith(":latest"):  
-                log.warning("rejected image %s", img)  
-            else:  
-                changes.append(f"image: `{c.get('image')}` → `{img}`")  
-                c["image"] = img  
 
-        res = c.setdefault("resources", {})  
-        for key, field in (("memory_limit", "limits"), ("memory_request", "requests")):  
-            val = patch.get(key)  
-            mi = to_mi(val)  
-            if val and (mi is None or mi > MAX_MEM_MI):  
-                log.warning("rejected %s=%s", key, val)  
+def open_pr(*args, **kwargs):  
+    ev = {}  
+    for a in args:  
+        if isinstance(a, dict):  
+            ev.update(a)  
+    ev.update(kwargs)  
+    diag = ev.get("diagnosis") if isinstance(ev.get("diagnosis"), dict) else ev  
+    repo = os.environ.get("GITHUB_REPO")  
+    root = os.environ.get("GITOPS_ROOT", "apps/")  
+    allowed = [n.strip() for n in os.environ.get("AUTO_PR_NAMESPACES", "default").split(",")]  
+    ns, dep = ev.get("namespace"), ev.get("deployment")  
+
+    if not repo or not os.environ.get("GITHUB_TOKEN"):  
+        return log.info("PR skipped: GITHUB_REPO or GITHUB_TOKEN missing")  
+    if ns not in allowed:  
+        return log.info("PR skipped: namespace %s not allowed", ns)  
+    if not dep:  
+        return log.info("PR skipped: %s/%s is not part of a Deployment", ns, ev.get("pod"))  
+    if str(diag.get("confidence", "")).lower() != "high":  
+        return log.info("PR skipped: confidence is not high")  
+
+    image, memory = _get_fix(diag)  
+    if memory and (_mem_mi(memory) is None or _mem_mi(memory) > MAX_MEM_MI):  
+        memory = None  
+    if not image and not memory:  
+        return log.info("PR skipped: no safe image/memory change for %s/%s", ns, dep)  
+
+    try:  
+        owner = repo.split("/")[0]  
+        branch = f"ai-fix/{ns}-{dep}"  
+        if _gh("GET", f"/repos/{repo}/pulls?state=open&head={owner}:{branch}"):  
+            return log.info("PR skipped: a PR is already open for %s/%s", ns, dep)  
+
+        base = _gh("GET", f"/repos/{repo}")["default_branch"]  
+        base_sha = _gh("GET", f"/repos/{repo}/git/ref/heads/{base}")["object"]["sha"]  
+        tree = _gh("GET", f"/repos/{repo}/git/trees/{base_sha}?recursive=1")["tree"]  
+
+        for f in tree:  
+            p = f["path"]  
+            if f["type"] != "blob" or not p.startswith(root) or not p.endswith((".yaml", ".yml")):  
                 continue  
-            if val and res.get(field, {}).get("memory") != val:  
-                old = res.setdefault(field, {}).get("memory")  
-                res[field]["memory"] = val  
-                changes.append(f"{field}.memory: `{old}` → `{val}`")  
-    return changes  
+            c = _gh("GET", f"/repos/{repo}/contents/{p}?ref={base}")  
+            text = base64.b64decode(c["content"]).decode()  
+            new = _edit(text, dep, image, memory)  
+            if not new:  
+                continue  
 
+            try:  
+                _gh("POST", f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": base_sha})  
+            except urllib.error.HTTPError as e:  
+                if e.code != 422:  
+                    raise  
+                _gh("DELETE", f"/repos/{repo}/git/refs/heads/{branch}")  
+                _gh("POST", f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": base_sha})  
 
-def open_pr(record, patch):  
-    deploy, ns, issue = record.get("deployment"), record["namespace"], record["issue"]  
-    if not (TOKEN and REPO and deploy and patch) or ns not in ALLOWED_NS:  
-        return None  
-    if record["diagnosis"].get("confidence") != "high":  
-        log.info("PR skipped: confidence not high")  
-        return None  
+            change = ", ".join(x for x in [f"image={image}" if image else "", f"memory={memory}" if memory else ""] if x)  
+            _gh("PUT", f"/repos/{repo}/contents/{p}", {  
+                "message": f"AI fix for {ns}/{dep}: {change}",  
+                "content": base64.b64encode(new.encode()).decode(),  
+                "sha": c["sha"],  
+                "branch": branch,  
+            })  
+            pr = _gh("POST", f"/repos/{repo}/pulls", {  
+                "title": f"AI fix: {ev.get('issue', 'issue')} in {ns}/{dep}",  
+                "head": branch,  
+                "base": base,  
+                "body": f"**Root cause:** {diag.get('root_cause')}\n\n**Fix:** {diag.get('fix')}\n\n**Change:** {change}\n\nOpened by ai-agent. Review before you merge.",  
+            })  
+            log.info("PR opened %s", pr.get("html_url"))  
+            return pr.get("html_url")  
 
-    open_prs = gh("GET", "/pulls?state=open&per_page=50")  
-    if any(p["title"].startswith(f"fix({deploy})") for p in open_prs):  
-        log.info("PR skipped: one is already open for %s", deploy)  
-        return None  
-
-    path, fsha, docs = find_manifest(deploy, ns)  
-    if not path:  
-        log.info("PR skipped: no manifest for %s/%s under %s", ns, deploy, ROOT)  
-        return None  
-    changes = apply_patch(docs, deploy, patch)  
-    if not changes:  
-        log.info("PR skipped: no safe change")  
-        return None  
-
-    branch = f"ai-fix/{deploy}-{issue.lower()}-{int(time.time())}"  
-    base_sha = gh("GET", f"/git/ref/heads/{BASE}")["object"]["sha"]  
-    gh("POST", "/git/refs", {"ref": f"refs/heads/{branch}", "sha": base_sha})  
-    content = yaml.safe_dump_all(docs, sort_keys=False)  
-    gh("PUT", f"/contents/{path}", {"message": f"fix({deploy}): {issue}", "branch": branch,  
-                                    "sha": fsha, "content": base64.b64encode(content.encode()).decode()})  
-
-    dg = record["diagnosis"]  
-    body = "\n".join([  
-        f"## 🤖 AI fix for `{ns}/{deploy}` ({issue})",  
-        f"**Root cause:** {dg.get('root_cause')}", "",  
-        "**Evidence:**", *[f"- `{e}`" for e in dg.get("evidence", [])[:5]], "",  
-        "**Changes:**", *[f"- {c}" for c in changes], "",  
-        f"**Confidence:** {dg.get('confidence')}", "",  
-        "_Generated by ai-agent. Review before merging. Argo CD deploys after merge._"])  
-    pr = gh("POST", "/pulls", {"title": f"fix({deploy}): {issue} - {changes[0]}",  
-                               "head": branch, "base": BASE, "body": body})  
-    log.info("PR opened %s", pr["html_url"])  
-    return pr["html_url"]  
+        log.info("PR skipped: no file under %s has Deployment %s", root, dep)  
+    except urllib.error.HTTPError as e:  
+        log.error("PR failed: HTTP %s %s", e.code, e.read().decode()[:300])  
+    except Exception as e:  
+        log.error("PR failed: %s", e)  
