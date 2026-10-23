@@ -14,13 +14,17 @@ spec:
       serviceAccountName: ai-agent  
       containers:  
         - name: agent  
-          image: ghcr.io/techabdulrahman/ai-agent:732b0b3d139b44eba7d168a444ab959300591eef
+          image: ghcr.io/techabdulrahman/ai-agent:732b0b3d139b44eba7d168a444ab959300591eef  
           ports: [{ containerPort: 8080 }]  
           envFrom:  
             - secretRef: { name: ai-agent-secrets }  
-          env:                              # NEW  
-            - name: GEMINI_MODEL            # NEW  
-              value: gemini-3.5-flash-lite  # NEW  
+          env:  
+            - name: GEMINI_MODEL  
+              value: gemini-3.5-flash-lite  
+            - name: GRAFANA_URL  
+              value: https://breezysamosa3494.grafana.net  
+            - name: POLL_SECONDS  
+              value: "60"  
           readinessProbe:  
             httpGet: { path: /healthz, port: 8080 }  
           resources:  
