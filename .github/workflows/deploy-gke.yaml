@@ -20,7 +20,6 @@ jobs:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GKE_CLUSTER: ${{ vars.GKE_CLUSTER }}
       GKE_LOCATION: ${{ vars.GKE_LOCATION }}
-      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       WEBHOOK_TOKEN: ${{ secrets.WEBHOOK_TOKEN }}
@@ -36,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           for name in GCP_PROJECT_ID GKE_CLUSTER GKE_LOCATION \
-            GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SERVICE_ACCOUNT \
+            GCP_SERVICE_ACCOUNT \
             GEMINI_API_KEY WEBHOOK_TOKEN; do
             if [[ -z "${!name}" ]]; then
               echo "::error::$name must be configured in GitHub Actions variables or secrets."
@@ -48,7 +47,7 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          workload_identity_provider: projects/807744285814/locations/global/workloadIdentityPools/github-pool/providers/ai-k8s-gitops-provider
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - name: Set up Google Cloud CLI

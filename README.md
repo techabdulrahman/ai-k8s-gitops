@@ -107,8 +107,10 @@ Add these **repository variables**:
 | `GCP_PROJECT_ID` | `abdulproject-510307` |
 | `GKE_CLUSTER` | `ai-k8s` |
 | `GKE_LOCATION` | `asia-south1` |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | The provider resource path printed by the commands above |
 | `GCP_SERVICE_ACCOUNT` | The service-account email printed above |
+
+The deploy workflow pins the Workload Identity Provider resource name in
+`.github/workflows/deploy-gke.yaml`; it is not a GitHub Actions variable.
 
 Add these **repository secrets**:
 
