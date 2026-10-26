@@ -26,6 +26,7 @@ GitHub pull request.
 | `argocd/ai-agent-app.yaml` | Argo CD Application pointing to `apps/ai-agent` |
 | `.github/workflows/build-agent.yaml` | Builds and publishes the container when agent code changes |
 | `.github/workflows/deploy-gke.yaml` | Manually installs Argo CD and deploys the agent to an existing GKE cluster |
+| `.github/workflows/deploy-grafana-monitoring.yaml` | Manually deploys Grafana Kubernetes Monitoring to GKE |
 
 ## Prerequisites
 
@@ -121,8 +122,14 @@ Add these **repository secrets**:
 | `WEBHOOK_TOKEN` | Yes | Authenticates alert webhook requests |
 | `AI_AGENT_GITHUB_TOKEN` | No | Allows the agent to create GitHub pull requests |
 | `GRAFANA_TOKEN` | No | Allows the agent to poll Grafana |
+| `GRAFANA_CLOUD_TOKEN` | Required for monitoring workflow | Grafana Cloud access-policy token for telemetry ingestion |
 
 Never put credentials in manifests, source files, or committed workflow YAML.
+
+For `GRAFANA_CLOUD_TOKEN`, use a Grafana Cloud access-policy token with the
+`metrics:read` and `set:alloy-data-write` scopes. The monitoring workflow passes
+the token to Helm at run time; Helm stores release data in a Kubernetes Secret,
+so restrict access to secrets in the cluster.
 
 ## Deploy Argo CD and the agent
 
@@ -154,6 +161,30 @@ kubectl rollout status deployment/ai-agent -n ai-agent
 
 The Argo CD Application tracks the `main` branch. The build workflow pushes a new
 agent image and updates its image tag in Git; Argo CD then syncs that manifest.
+
+## Deploy Grafana Kubernetes Monitoring
+
+1. In Grafana Cloud's Kubernetes Monitoring setup, select **GKE Autopilot** and
+   install the recommended backend recording and alert rules.
+2. Create a replacement access-policy token with `metrics:read` and
+   `set:alloy-data-write` scopes. Add its value as the GitHub Actions secret
+   `GRAFANA_CLOUD_TOKEN`; do not paste the token into the workflow or commit it.
+3. Run **Actions → Deploy Grafana Kubernetes Monitoring** from `main`. Provide
+   the full Prometheus remote-write URL and instance ID shown for your Grafana
+   Cloud stack, plus a cluster label.
+4. Check the deployment in Cloud Shell:
+
+   ```bash
+   helm list -n monitoring
+   kubectl get pods -n monitoring
+   kubectl get events -n monitoring --sort-by=.lastTimestamp
+   ```
+
+This workflow pins Grafana's `k8s-monitoring` chart to `4.5.5` and enables
+Kubernetes cluster metrics only. It intentionally leaves host metrics, logs,
+cost metrics, and other optional collectors disabled for a minimal Autopilot
+setup. After metrics arrive, create or enable an alert rule in Grafana Cloud
+Alerting and verify that it evaluates against this cluster's data.
 
 ## Open the dashboard
 

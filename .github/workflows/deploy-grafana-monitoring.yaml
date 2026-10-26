@@ -1,0 +1,145 @@
+name: Deploy Grafana Kubernetes Monitoring
+
+on:
+  workflow_dispatch:
+    inputs:
+      grafana_prometheus_url:
+        description: Full Grafana Cloud Prometheus remote-write URL from your stack
+        required: true
+        type: string
+      grafana_instance_id:
+        description: Grafana Cloud Prometheus username / instance ID
+        required: true
+        type: string
+      cluster_name:
+        description: Cluster label to use in Grafana
+        required: true
+        default: my-cluster
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-grafana-monitoring
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GKE_CLUSTER: ${{ vars.GKE_CLUSTER }}
+      GKE_LOCATION: ${{ vars.GKE_LOCATION }}
+      GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      GRAFANA_CLOUD_TOKEN: ${{ secrets.GRAFANA_CLOUD_TOKEN }}
+      GRAFANA_PROMETHEUS_URL: ${{ inputs.grafana_prometheus_url }}
+      GRAFANA_INSTANCE_ID: ${{ inputs.grafana_instance_id }}
+      GRAFANA_CLUSTER_NAME: ${{ inputs.cluster_name }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in GCP_PROJECT_ID GKE_CLUSTER GKE_LOCATION \
+            GCP_SERVICE_ACCOUNT GRAFANA_CLOUD_TOKEN \
+            GRAFANA_PROMETHEUS_URL GRAFANA_INSTANCE_ID GRAFANA_CLUSTER_NAME; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::$name must be configured before running this workflow."
+              exit 1
+            fi
+          done
+          if [[ "${GRAFANA_PROMETHEUS_URL}" != https://* ]]; then
+            echo "::error::GRAFANA_PROMETHEUS_URL must be an HTTPS remote-write URL."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: projects/807744285814/locations/global/workloadIdentityPools/github-pool/providers/ai-k8s-gitops-provider
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ vars.GKE_CLUSTER }}
+          location: ${{ vars.GKE_LOCATION }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.18.4
+
+      - name: Deploy Grafana Kubernetes Monitoring
+        shell: bash
+        run: |
+          set -euo pipefail
+          values_file="${RUNNER_TEMP}/grafana-k8s-monitoring-values.json"
+          trap 'rm -f "$values_file"' EXIT
+
+          python - <<'PY'
+          import json
+          import os
+
+          values = {
+              "cluster": {"name": os.environ["GRAFANA_CLUSTER_NAME"]},
+              "destinations": {
+                  "grafanaCloud": {
+                      "type": "prometheus",
+                      "url": os.environ["GRAFANA_PROMETHEUS_URL"],
+                      "auth": {
+                          "type": "basic",
+                          "username": os.environ["GRAFANA_INSTANCE_ID"],
+                          "password": os.environ["GRAFANA_CLOUD_TOKEN"],
+                      },
+                  }
+              },
+              "clusterMetrics": {
+                  "enabled": True,
+                  "collector": "alloy-metrics",
+              },
+              "collectors": {
+                  "alloy-metrics": {
+                      "presets": ["clustered", "statefulset"],
+                  },
+              },
+              "telemetryServices": {
+                  "kube-state-metrics": {
+                      "deploy": True,
+                  },
+              },
+          }
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "grafana-k8s-monitoring-values.json"), "w", encoding="utf-8") as file:
+              json.dump(values, file)
+          PY
+
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo update grafana
+          helm upgrade --install grafana-k8s-monitoring grafana/k8s-monitoring \
+            --version 4.5.5 \
+            --namespace monitoring \
+            --create-namespace \
+            --values "$values_file" \
+            --wait \
+            --timeout 15m || {
+              kubectl get pods -n monitoring
+              kubectl get events -n monitoring --sort-by=.lastTimestamp
+              exit 1
+            }
+
+          kubectl get pods -n monitoring

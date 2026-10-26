@@ -22,7 +22,7 @@ spec:
             - name: GEMINI_MODEL  
               value: gemini-3.5-flash-lite  
             - name: GRAFANA_URL  
-              value: https://breezysamosa3494.grafana.net  
+              value: https://kindcrocus1399.grafana.net
             - name: POLL_SECONDS  
               value: "60"  
             - name: GITHUB_REPO  
