@@ -1,4 +1,4 @@
-import os, json, logging, hashlib, threading, time, html, datetime, urllib.request, urllib.parse  
+import os, json, logging, hashlib, threading, time, html, datetime, urllib.request, urllib.parse, urllib.error
 from collections import deque  
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks  
 from fastapi.responses import HTMLResponse  
@@ -144,6 +144,9 @@ def poll_loop():
                 log.info("new alert %s %s/%s", a["labels"].get("alertname"),  
                          a["labels"].get("namespace"), a["labels"].get("pod"))  
                 diagnose(a["labels"], "grafana-poll")  
+        except urllib.error.HTTPError as e:
+            LAST_POLL.update(time=time.time(), ok=False)
+            log.warning("Grafana poll returned HTTP %s", e.code)
         except Exception as e:  
             LAST_POLL.update(time=time.time(), ok=False)  
             log.warning("poll failed: %s", e.__class__.__name__)
