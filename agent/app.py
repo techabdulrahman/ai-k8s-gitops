@@ -1,4 +1,4 @@
-import os, json, logging, hashlib, threading, time, html, datetime, urllib.request, urllib.parse, urllib.error
+import os, json, logging, hashlib, threading, time, html, datetime, hmac, urllib.request, urllib.parse, urllib.error
 from collections import deque  
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks  
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -130,21 +130,64 @@ def fetch_firing_alerts():
         return json.load(r)  
 
 
-def poll_loop():  
+def _process_alerts(alerts, source, firing_status, background_tasks=None):
+    firing_count = 0
+    for alert in alerts:
+        if not isinstance(alert, dict):
+            continue
+        status = alert.get("status")
+        state = status.get("state") if isinstance(status, dict) else status
+        labels = alert.get("labels")
+        fingerprint = str(alert.get("fingerprint") or hashlib.sha1(
+            json.dumps(labels or {}, sort_keys=True).encode()
+        ).hexdigest())
+
+        if state in ("resolved", "inactive"):
+            with LOCK:
+                SEEN.discard(fingerprint)
+            continue
+        if state != firing_status:
+            continue
+
+        firing_count += 1
+        if not isinstance(labels, dict):
+            log.warning("Grafana alert is missing valid labels")
+            continue
+        with LOCK:
+            if fingerprint in SEEN:
+                continue
+            SEEN.add(fingerprint)
+
+        if background_tasks is None:
+            diagnose(labels, source)
+        else:
+            background_tasks.add_task(diagnose, labels, source)
+    return firing_count
+
+
+def poll_loop():
     log.info("polling %s every %ss", GRAFANA_URL, POLL_SECONDS)  
     while True:  
         try:  
-            alerts = [a for a in fetch_firing_alerts() if a.get("status", {}).get("state") == "active"]  
-            LAST_POLL.update(time=time.time(), ok=True, firing=len(alerts))  
-            current = {a["fingerprint"] for a in alerts}  
+            alerts = fetch_firing_alerts()
+            firing_count = sum(
+                1 for alert in alerts
+                if isinstance(alert.get("status"), dict)
+                and alert["status"].get("state") == "active"
+            )
+            current = {
+                str(alert.get("fingerprint") or hashlib.sha1(
+                    json.dumps(alert.get("labels") or {}, sort_keys=True).encode()
+                ).hexdigest())
+                for alert in alerts
+                if isinstance(alert.get("status"), dict)
+                and alert["status"].get("state") == "active"
+            }
             with LOCK:  
                 SEEN.intersection_update(current)  
-                new = [a for a in alerts if a["fingerprint"] not in SEEN]  
-                SEEN.update(a["fingerprint"] for a in new)  
-            for a in new:  
-                log.info("new alert %s %s/%s", a["labels"].get("alertname"),  
-                         a["labels"].get("namespace"), a["labels"].get("pod"))  
-                diagnose(a["labels"], "grafana-poll")  
+            _process_alerts(alerts, "grafana-poll", "active")
+            LAST_POLL.update(time=time.time(), ok=True, firing=firing_count)
+            log.info("Grafana poll ok: %d alerts (%d firing)", len(alerts), firing_count)
         except urllib.error.HTTPError as e:
             LAST_POLL.update(time=time.time(), ok=False)
             endpoint_path = urllib.parse.urlparse(e.url).path
@@ -175,19 +218,26 @@ def start_polling():
 
 @app.post("/webhook")  
 async def webhook(req: Request, bg: BackgroundTasks, authorization: str = Header(default="")):  
-    if authorization != f"Bearer {WEBHOOK_TOKEN}":  
+    if not hmac.compare_digest(authorization, f"Bearer {WEBHOOK_TOKEN}"):
         raise HTTPException(401)  
-    body = await req.json()  
-    for a in body.get("alerts", []):  
-        if a.get("status") != "firing":  
-            continue  
-        key = a.get("fingerprint") or hashlib.sha1(json.dumps(a.get("labels"), sort_keys=True).encode()).hexdigest()  
-        with LOCK:  
-            if key in SEEN:  
-                continue  
-            SEEN.add(key)  
-        bg.add_task(diagnose, a.get("labels", {}), "webhook")  
-    return {"accepted": True}  
+    body = await req.json()
+    alerts = body.get("alerts") if isinstance(body, dict) else None
+    if not isinstance(alerts, list):
+        raise HTTPException(400, "Grafana webhook payload must contain an alerts list")
+    _process_alerts(alerts, "webhook", "firing", bg)
+    return {"accepted": True}
+
+
+@app.post("/webhook/grafana")
+async def grafana_webhook(req: Request, bg: BackgroundTasks, authorization: str = Header(default="")):
+    if not hmac.compare_digest(authorization, f"Bearer {WEBHOOK_TOKEN}"):
+        raise HTTPException(401)
+    body = await req.json()
+    alerts = body.get("alerts") if isinstance(body, dict) else None
+    if not isinstance(alerts, list):
+        raise HTTPException(400, "Grafana webhook payload must contain an alerts list")
+    _process_alerts(alerts, "grafana-webhook", "firing", bg)
+    return {"accepted": True}
 
 
 @app.get("/diagnoses")  

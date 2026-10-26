@@ -21,10 +21,6 @@ jobs:
       GKE_CLUSTER: ${{ vars.GKE_CLUSTER }}
       GKE_LOCATION: ${{ vars.GKE_LOCATION }}
       GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      WEBHOOK_TOKEN: ${{ secrets.WEBHOOK_TOKEN }}
-      AI_AGENT_GITHUB_TOKEN: ${{ secrets.AI_AGENT_GITHUB_TOKEN }}
-      GRAFANA_TOKEN: ${{ secrets.GRAFANA_TOKEN }}
 
     steps:
       - name: Check out repository
@@ -35,8 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           for name in GCP_PROJECT_ID GKE_CLUSTER GKE_LOCATION \
-            GCP_SERVICE_ACCOUNT \
-            GEMINI_API_KEY WEBHOOK_TOKEN; do
+            GCP_SERVICE_ACCOUNT; do
             if [[ -z "${!name}" ]]; then
               echo "::error::$name must be configured in GitHub Actions variables or secrets."
               exit 1
@@ -62,6 +57,12 @@ jobs:
           location: ${{ vars.GKE_LOCATION }}
           project_id: ${{ vars.GCP_PROJECT_ID }}
 
+      - name: Ensure agent namespace exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl create namespace ai-agent --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Install Argo CD
         shell: bash
         run: |
@@ -73,28 +74,6 @@ jobs:
           kubectl rollout status deployment/argocd-server -n argocd --timeout=15m
           kubectl rollout status statefulset/argocd-application-controller -n argocd --timeout=15m
 
-      - name: Create agent credentials
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl create namespace ai-agent --dry-run=client -o yaml | kubectl apply -f -
-
-          secret_args=(
-            "--from-literal=GEMINI_API_KEY=${GEMINI_API_KEY}"
-            "--from-literal=WEBHOOK_TOKEN=${WEBHOOK_TOKEN}"
-          )
-          if [[ -n "${AI_AGENT_GITHUB_TOKEN}" ]]; then
-            secret_args+=("--from-literal=GITHUB_TOKEN=${AI_AGENT_GITHUB_TOKEN}")
-          fi
-          if [[ -n "${GRAFANA_TOKEN}" ]]; then
-            secret_args+=("--from-literal=GRAFANA_TOKEN=${GRAFANA_TOKEN}")
-          fi
-
-          kubectl create secret generic ai-agent-secrets \
-            --namespace ai-agent \
-            "${secret_args[@]}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
       - name: Apply Argo CD application
         run: |
           kubectl apply -f argocd/ai-agent-app.yaml
@@ -104,12 +83,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          kubectl rollout status deployment/ai-agent -n ai-agent --timeout=15m || {
-            kubectl get applications -n argocd
-            kubectl get pods -n argocd
-            kubectl get pods -n ai-agent
-            exit 1
-          }
+          if kubectl get secret ai-agent-secrets -n ai-agent >/dev/null 2>&1; then
+            kubectl rollout status deployment/ai-agent -n ai-agent --timeout=15m || {
+              kubectl get applications -n argocd
+              kubectl get pods -n argocd
+              kubectl get pods -n ai-agent
+              exit 1
+            }
+          else
+            echo "::warning::Agent Secret is not present. Run the Sync AI Agent Secrets workflow to create it and start the agent."
+          fi
 
       - name: Wait for demo rollout
         run: kubectl rollout status deployment/demo-nginx -n default --timeout=15m
