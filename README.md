@@ -35,11 +35,12 @@ GitHub pull request.
 - A Gemini API key and a random webhook token.
 - Workload Identity Federation configured between GitHub Actions and Google Cloud.
 
-> **Cluster readiness:** Autopilot manages worker nodes, but it still needs to
-> provision capacity for workloads. The deploy workflow checks for a Ready node
-> and exits before installing anything if none is available. If `kubectl get nodes`
-> returns no nodes and system Pods are Pending, resolve that GKE provisioning issue
-> before deploying this application.
+> **Autopilot nodes:** Autopilot manages worker nodes; you do not create a node pool
+> manually. An empty `kubectl get nodes` result by itself is not a reason to stop:
+> this deployment workflow submits Argo CD workloads, which require Autopilot to
+> provision capacity. The workflow waits for the Argo CD and agent Deployments to
+> become Ready. If those rollouts time out, inspect Pending Pods and their events
+> to identify the scheduling or provisioning issue.
 
 ## Configure GitHub Actions authentication
 
@@ -138,9 +139,9 @@ Never put credentials in manifests, source files, or committed workflow YAML.
 2. Push the workflow and related changes to `main`.
 3. In GitHub, open **Actions → Deploy Argo CD and AI Agent → Run workflow** and run
    it from `main`.
-4. The workflow authenticates to GCP, checks cluster readiness, installs Argo CD,
-   creates the `ai-agent-secrets` Secret, applies the Argo CD Application, and waits
-   for the agent Deployment.
+4. The workflow authenticates to GCP, installs Argo CD, creates the
+   `ai-agent-secrets` Secret, applies the Argo CD Application, and waits for the
+   agent Deployment while Autopilot provisions capacity.
 
 Check the result:
 

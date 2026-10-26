@@ -15,7 +15,7 @@ jobs:
   deploy:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GKE_CLUSTER: ${{ vars.GKE_CLUSTER }}
@@ -62,21 +62,6 @@ jobs:
           location: ${{ vars.GKE_LOCATION }}
           project_id: ${{ vars.GCP_PROJECT_ID }}
 
-      - name: Verify Autopilot has a Ready node
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! kubectl get nodes -o wide; then
-            echo "::error::Cannot access GKE nodes. Check the cluster and Workload Identity permissions."
-            exit 1
-          fi
-          node_conditions="$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}')"
-          if ! grep -q '^True$' <<< "$node_conditions"; then
-            echo "::error::GKE has no Ready nodes. Autopilot must provision capacity before Argo CD or the AI agent can run."
-            kubectl get pods -A || true
-            exit 1
-          fi
-
       - name: Install Argo CD
         shell: bash
         run: |
@@ -85,8 +70,8 @@ jobs:
           kubectl apply --server-side --force-conflicts -n argocd \
             -f https://raw.githubusercontent.com/argoproj/argo-cd/v3.5.6/manifests/install.yaml
           kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=180s
-          kubectl rollout status deployment/argocd-server -n argocd --timeout=10m
-          kubectl rollout status statefulset/argocd-application-controller -n argocd --timeout=10m
+          kubectl rollout status deployment/argocd-server -n argocd --timeout=15m
+          kubectl rollout status statefulset/argocd-application-controller -n argocd --timeout=15m
 
       - name: Create agent credentials
         shell: bash
@@ -117,7 +102,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          kubectl rollout status deployment/ai-agent -n ai-agent --timeout=10m || {
+          kubectl rollout status deployment/ai-agent -n ai-agent --timeout=15m || {
             kubectl get applications -n argocd
             kubectl get pods -n argocd
             kubectl get pods -n ai-agent
