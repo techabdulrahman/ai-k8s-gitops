@@ -146,7 +146,7 @@ def poll_loop():
                 diagnose(a["labels"], "grafana-poll")  
         except Exception as e:  
             LAST_POLL.update(time=time.time(), ok=False)  
-            log.warning("poll failed: %s", e)  
+            log.warning("poll failed: %s", e.__class__.__name__)
         time.sleep(POLL_SECONDS)  
 
 
