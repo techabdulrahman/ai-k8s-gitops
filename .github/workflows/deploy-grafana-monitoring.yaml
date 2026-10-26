@@ -61,6 +61,38 @@ jobs:
             exit 1
           fi
 
+      - name: Validate Grafana Cloud credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+
+          grafana_instance_id="$(python -c 'import os; print(os.environ["GRAFANA_INSTANCE_ID"].strip())')"
+          grafana_cloud_token="$(python -c 'import os; print(os.environ["GRAFANA_CLOUD_TOKEN"].strip())')"
+          if [[ ! "${grafana_instance_id}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Grafana instance ID must contain only digits."
+            exit 1
+          fi
+
+          labels_url="${GRAFANA_PROMETHEUS_URL%/push}/api/v1/labels"
+          http_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --user "${grafana_instance_id}:${grafana_cloud_token}" \
+            "${labels_url}")" || {
+              echo "::error::Could not connect to the Grafana Cloud Prometheus API."
+              exit 1
+            }
+
+          if [[ "${http_status}" != "200" ]]; then
+            case "${http_status}" in
+              401) echo "::error::Grafana rejected the credentials (HTTP 401). Check the instance ID and token." ;;
+              403) echo "::error::Grafana denied access (HTTP 403). Check that the token has the required scope." ;;
+              *) echo "::error::Grafana Cloud credential validation returned HTTP ${http_status}." ;;
+            esac
+            exit 1
+          fi
+
+          echo "Grafana Cloud credentials validated."
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -104,14 +136,31 @@ jobs:
                       "url": os.environ["GRAFANA_PROMETHEUS_URL"],
                       "auth": {
                           "type": "basic",
-                          "username": os.environ["GRAFANA_INSTANCE_ID"],
-                          "password": os.environ["GRAFANA_CLOUD_TOKEN"],
+                          "username": os.environ["GRAFANA_INSTANCE_ID"].strip(),
+                          "password": os.environ["GRAFANA_CLOUD_TOKEN"].strip(),
                       },
                   }
               },
               "clusterMetrics": {
                   "enabled": True,
                   "collector": "alloy-metrics",
+                  "kube-state-metrics": {
+                      "metricsTuning": {
+                          "includeMetrics": [
+                              "kube_pod_container_status_waiting_reason",
+                              "kube_pod_container_status_terminated_reason",
+                              "kube_pod_container_status_last_terminated_reason",
+                              "kube_pod_status_reason",
+                          ],
+                      },
+                  },
+                  "cadvisor": {
+                      "metricsTuning": {
+                          "includeMetrics": [
+                              "container_oom_events_total",
+                          ],
+                      },
+                  },
               },
               "collectors": {
                   "alloy-metrics": {
@@ -143,3 +192,11 @@ jobs:
             }
 
           kubectl get pods -n monitoring
+
+      - name: Restart Alloy metrics collector
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl rollout restart statefulset grafana-k8s-monitoring-alloy-metrics -n monitoring
+          kubectl rollout status statefulset/grafana-k8s-monitoring-alloy-metrics \
+            -n monitoring --timeout=10m
