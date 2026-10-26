@@ -9,10 +9,10 @@ from github_pr import open_pr
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")  
 log = logging.getLogger("ai-agent")  
 
-WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]  
+WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"].strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")  
 GRAFANA_URL = os.getenv("GRAFANA_URL", "").rstrip("/")  
-GRAFANA_TOKEN = os.getenv("GRAFANA_TOKEN", "")  
+GRAFANA_TOKEN = os.getenv("GRAFANA_TOKEN", "").strip()
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "60"))  
 
 gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])  
