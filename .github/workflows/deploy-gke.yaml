@@ -28,6 +28,9 @@ jobs:
       GRAFANA_TOKEN: ${{ secrets.GRAFANA_TOKEN }}
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Check deployment configuration
         shell: bash
         run: |
