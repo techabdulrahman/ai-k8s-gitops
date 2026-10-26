@@ -127,9 +127,11 @@ Add these **repository secrets**:
 Never put credentials in manifests, source files, or committed workflow YAML.
 
 For `GRAFANA_CLOUD_TOKEN`, use a Grafana Cloud access-policy token with the
-`metrics:read` and `set:alloy-data-write` scopes. The monitoring workflow passes
-the token to Helm at run time; Helm stores release data in a Kubernetes Secret,
-so restrict access to secrets in the cluster.
+`metrics:write` scope for the stack that owns the Prometheus remote-write
+endpoint. This workflow writes directly to Prometheus; it does not use the
+Grafana Fleet Management endpoint or its `set:alloy-data-write` scope. The
+workflow passes the token to Helm at run time; Helm stores release data in a
+Kubernetes Secret, so restrict access to secrets in the cluster.
 
 ## Deploy Argo CD and the agent
 
@@ -166,9 +168,9 @@ agent image and updates its image tag in Git; Argo CD then syncs that manifest.
 
 1. In Grafana Cloud's Kubernetes Monitoring setup, select **GKE Autopilot** and
    install the recommended backend recording and alert rules.
-2. Create a replacement access-policy token with `metrics:read` and
-   `set:alloy-data-write` scopes. Add its value as the GitHub Actions secret
-   `GRAFANA_CLOUD_TOKEN`; do not paste the token into the workflow or commit it.
+2. Create an access-policy token for the same stack with the `metrics:write`
+   scope. Add its value as the GitHub Actions secret `GRAFANA_CLOUD_TOKEN`; do
+   not paste the token into the workflow or commit it.
 3. Run **Actions → Deploy Grafana Kubernetes Monitoring** from `main`. Provide
    the full Prometheus remote-write URL and instance ID shown for your Grafana
    Cloud stack, plus a cluster label.
