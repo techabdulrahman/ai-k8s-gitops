@@ -1,7 +1,7 @@
 import os, json, logging, hashlib, threading, time, html, datetime, urllib.request, urllib.parse, urllib.error
 from collections import deque  
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks  
-from fastapi.responses import HTMLResponse  
+from fastapi.responses import HTMLResponse, JSONResponse
 from kubernetes import client, config  
 from google import genai  
 from github_pr import open_pr  
@@ -13,6 +13,7 @@ WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"].strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")  
 GRAFANA_URL = os.getenv("GRAFANA_URL", "").rstrip("/")  
 GRAFANA_TOKEN = os.getenv("GRAFANA_TOKEN", "").strip()
+GRAFANA_TOKEN_IS_CLOUD_POLICY = GRAFANA_TOKEN.startswith("glc_")
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "60"))  
 
 gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])  
@@ -146,7 +147,14 @@ def poll_loop():
                 diagnose(a["labels"], "grafana-poll")  
         except urllib.error.HTTPError as e:
             LAST_POLL.update(time=time.time(), ok=False)
-            log.warning("Grafana poll returned HTTP %s", e.code)
+            endpoint_path = urllib.parse.urlparse(e.url).path
+            if e.code == 401:
+                hint = "invalid credentials or wrong token type"
+            elif e.code == 403:
+                hint = "service account role may be too low"
+            else:
+                hint = "request failed"
+            log.warning("Grafana request %s returned HTTP %s: %s", endpoint_path, e.code, hint)
         except Exception as e:  
             LAST_POLL.update(time=time.time(), ok=False)  
             log.warning("poll failed: %s", e.__class__.__name__)
@@ -155,7 +163,11 @@ def poll_loop():
 
 @app.on_event("startup")  
 def start_polling():  
-    if GRAFANA_URL and GRAFANA_TOKEN:  
+    if GRAFANA_TOKEN_IS_CLOUD_POLICY:
+        log.error(
+            "GRAFANA_TOKEN is a Cloud access policy token; use a Grafana service account token (glsa_)"
+        )
+    elif GRAFANA_URL and GRAFANA_TOKEN:
         threading.Thread(target=poll_loop, daemon=True).start()  
     else:  
         log.warning("GRAFANA_URL/GRAFANA_TOKEN not set: polling disabled")  
@@ -185,7 +197,15 @@ def diagnoses():
 
 @app.get("/healthz")  
 def healthz():  
-    return {"ok": True}  
+    if GRAFANA_TOKEN_IS_CLOUD_POLICY:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ready": False,
+                "error": "GRAFANA_TOKEN must be a Grafana service account token (glsa_), not a Cloud access policy token",
+            },
+        )
+    return {"ok": True, "ready": True}
 
 
 # ---------- Web UI ----------  

@@ -121,7 +121,7 @@ Add these **repository secrets**:
 | `GEMINI_API_KEY` | Yes | Gemini API access |
 | `WEBHOOK_TOKEN` | Yes | Authenticates alert webhook requests |
 | `AI_AGENT_GITHUB_TOKEN` | No | Allows the agent to create GitHub pull requests |
-| `GRAFANA_TOKEN` | No | Allows the agent to poll Grafana |
+| `GRAFANA_TOKEN` | No | Grafana service-account token (`glsa_`) for alert polling |
 | `GRAFANA_CLOUD_TOKEN` | Required for monitoring workflow | Grafana Cloud access-policy token for telemetry ingestion |
 
 Never put credentials in manifests, source files, or committed workflow YAML.
@@ -132,6 +132,42 @@ endpoint. This workflow writes directly to Prometheus; it does not use the
 Grafana Fleet Management endpoint or its `set:alloy-data-write` scope. The
 workflow passes the token to Helm at run time; Helm stores release data in a
 Kubernetes Secret, so restrict access to secrets in the cluster.
+
+## Grafana token setup
+
+The agent polls the Grafana Alertmanager API endpoint
+`/api/alertmanager/grafana/api/v2/alerts` for active alerts labeled
+`ai_agent="true"`. It authenticates with a Grafana service-account token in a
+Bearer authorization header. A Viewer service-account role is sufficient for
+this read-only alert-list endpoint; use a higher role only if your Grafana
+instance has customized permissions that remove alert-instance read access.
+
+Create and configure the token as follows:
+
+1. In Grafana, open **Administration → Users and access → Service accounts**.
+2. Create or select the `ai-agent` service account with the **Viewer** role, then
+   generate a service-account token. Use the token value (expected prefix
+   `glsa_`), not the service-account ID or a Cloud access-policy token (often
+   `glc_`).
+3. Save the token as the GitHub Actions repository secret `GRAFANA_TOKEN`.
+   The **Deploy Argo CD and AI Agent** workflow creates/updates the Kubernetes
+   `ai-agent-secrets` Secret from GitHub Actions secrets. The Secret is not
+   defined in Git and is not managed or overwritten by Argo CD. Rerunning that
+   workflow will synchronize the Kubernetes Secret to the current GitHub secret.
+
+For emergency manual rotation, patch the Kubernetes Secret in Cloud Shell (put
+the new token in place of the empty string; never commit it):
+
+```bash
+kubectl patch secret ai-agent-secrets -n ai-agent --type merge -p '{"stringData":{"GRAFANA_TOKEN":""}}'
+```
+
+Then restart the agent so it reloads the Secret:
+
+```bash
+kubectl rollout restart deployment/ai-agent -n ai-agent
+kubectl rollout status deployment/ai-agent -n ai-agent
+```
 
 ## Deploy Argo CD and the agent
 
@@ -217,10 +253,5 @@ localhost.
 ## Current limitations
 
 - The agent is a prototype. AI diagnoses and suggested changes require human review.
-- The checked-in agent source currently contains literal `******` authorization
-  placeholders in the webhook and Grafana request paths. Until those are replaced
-  with the configured `WEBHOOK_TOKEN` and `GRAFANA_TOKEN`, those alert integrations
-  will not authenticate as intended. Fix the source and build a new image before
-  relying on alert intake or Grafana polling.
 - The GitHub Container Registry image must be readable by the cluster. If the
   package is private, configure an image pull secret for GKE.
