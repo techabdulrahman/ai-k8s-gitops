@@ -15,7 +15,8 @@ GitHub pull request.
 5. For eligible high-confidence image or memory changes, the agent can open a GitHub
    pull request. Review and merge changes yourself; the agent does not directly
    modify running workloads.
-6. Argo CD watches `apps/ai-agent` in this repository and syncs it to the cluster.
+6. Argo CD watches `apps/ai-agent` and `apps/demo` in this repository and syncs
+   both applications to the cluster.
 
 ## Repository layout
 
@@ -23,7 +24,9 @@ GitHub pull request.
 | --- | --- |
 | `agent/` | Python FastAPI agent, Gemini integration, dashboard, and optional PR logic |
 | `apps/ai-agent/` | Kubernetes manifests for the agent |
+| `apps/demo/` | Kubernetes manifests for the demo NGINX app |
 | `argocd/ai-agent-app.yaml` | Argo CD Application pointing to `apps/ai-agent` |
+| `argocd/demo-app.yaml` | Argo CD Application pointing to `apps/demo` |
 | `.github/workflows/build-agent.yaml` | Builds and publishes the container when agent code changes |
 | `.github/workflows/deploy-gke.yaml` | Manually installs Argo CD and deploys the agent to an existing GKE cluster |
 | `.github/workflows/deploy-grafana-monitoring.yaml` | Manually deploys Grafana Kubernetes Monitoring to GKE |
@@ -185,8 +188,8 @@ kubectl rollout status deployment/ai-agent -n ai-agent
 3. In GitHub, open **Actions → Deploy Argo CD and AI Agent → Run workflow** and run
    it from `main`.
 4. The workflow authenticates to GCP, installs Argo CD, creates the
-   `ai-agent-secrets` Secret, applies the Argo CD Application, and waits for the
-   agent Deployment while Autopilot provisions capacity.
+   `ai-agent-secrets` Secret, applies the Argo CD Applications for the agent and
+   demo, and waits for both Deployments while Autopilot provisions capacity.
 
 Check the result:
 
@@ -195,10 +198,12 @@ kubectl get pods -n argocd
 kubectl get applications -n argocd
 kubectl get pods,services -n ai-agent
 kubectl rollout status deployment/ai-agent -n ai-agent
+kubectl get pods -l app=demo-nginx -n default
 ```
 
-The Argo CD Application tracks the `main` branch. The build workflow pushes a new
-agent image and updates its image tag in Git; Argo CD then syncs that manifest.
+Both Argo CD Applications track the `main` branch. The build workflow pushes a
+new agent image and updates its image tag in Git; Argo CD then syncs that
+manifest. The demo is managed by the `demo` Application from `apps/demo`.
 
 ## Deploy Grafana Kubernetes Monitoring
 

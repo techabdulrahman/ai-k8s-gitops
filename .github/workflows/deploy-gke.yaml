@@ -96,7 +96,9 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Apply Argo CD application
-        run: kubectl apply -f argocd/ai-agent-app.yaml
+        run: |
+          kubectl apply -f argocd/ai-agent-app.yaml
+          kubectl apply -f argocd/demo-app.yaml
 
       - name: Wait for AI agent rollout
         shell: bash
@@ -108,3 +110,6 @@ jobs:
             kubectl get pods -n ai-agent
             exit 1
           }
+
+      - name: Wait for demo rollout
+        run: kubectl rollout status deployment/demo-nginx -n default --timeout=15m
