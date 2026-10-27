@@ -15,7 +15,7 @@ spec:
     spec:  
       containers:  
         - name: nginx  
-          image: nginx:notexist
+          image: nginx:1.27
           resources:  
             requests:  
               cpu: 50m  
